@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HopGuard demo</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E🛡️%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">🛡️</span>
+    <div>
+      <h1>HopGuard</h1>
+      <p class="tagline">A safety guard for an AI HR assistant</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span class="pill" title="All people, salaries and bank numbers are made up. Emails are saved to a local file, never sent.">All data is fake · no real email is sent</span>
+    <button class="btn ghost" id="helpBtn" type="button">❓ How it works</button>
+  </div>
+</header>
+
+<div id="keysBanner" class="banner warn" hidden></div>
+
+<section id="welcome" class="welcome" hidden>
+  <div class="welcome-text">
+    <h2>Welcome! Try to trick the AI assistant, then watch HopGuard stop it.</h2>
+    <p>This is a pretend HR assistant for a made-up company, <b>Acme India</b>. It can read HR policies,
+      look up employee records (salary, bank account, leave) and send email. Attackers try to make it leak
+      that private data. <b>HopGuard</b> checks every step the assistant takes and blocks the risky ones.</p>
+  </div>
+  <ol class="welcome-steps">
+    <li><b>Pick a scenario</b> on the left, for example <i>"Hidden instruction in a policy document"</i>.</li>
+    <li><b>Turn protection OFF</b> and press <b>Ask</b>. See what goes wrong.</li>
+    <li><b>Turn protection ON</b> and ask again. See what HopGuard stopped, and why.</li>
+  </ol>
+  <button class="btn primary" id="welcomeClose" type="button">Got it, let's start</button>
+</section>
+
+<main class="layout">
+  <!-- ============ LEFT: settings ============ -->
+  <aside class="panel settings" aria-label="Settings">
+    <section class="step">
+      <h2><span class="num">1</span> Choose a scenario</h2>
+      <p class="hint">A ready-made example fills in everything for you. Or skip this and type your own question.</p>
+      <div class="scen-group-title danger-text">⚠️ Attacks (someone trying to steal data)</div>
+      <div id="attackList" class="scen-list"></div>
+      <div class="scen-group-title ok-text">✅ Everyday requests (should just work)</div>
+      <div id="benignList" class="scen-list"></div>
+    </section>
+
+    <section class="step">
+      <h2><span class="num">2</span> Protection</h2>
+      <label class="bigswitch">
+        <input type="checkbox" id="guardSwitch" checked>
+        <span class="track"><span class="thumb"></span></span>
+        <span class="bigswitch-label">
+          <b id="guardLabel">Protection is ON</b>
+          <small id="guardSub">HopGuard checks every step.</small>
+        </span>
+      </label>
+      <details class="layers">
+        <summary>Advanced: turn single checks on or off</summary>
+        <p class="hint">HopGuard has three checks. Switching one off shows what the others still catch.</p>
+        <div id="layerList"></div>
+      </details>
+    </section>
+
+    <section class="step">
+      <h2><span class="num">3</span> Who is asking?</h2>
+      <p class="hint">In a real app this comes from the login, not from the chat. Typing "I am HR admin" in
+        the chat changes nothing.</p>
+      <label class="field">Person
+        <select id="personSel"></select>
+      </label>
+      <label class="field">Role
+        <select id="roleSel"></select>
+      </label>
+      <p class="hint" id="roleHint"></p>
+    </section>
+  </aside>
+
+  <!-- ============ MIDDLE: chat ============ -->
+  <section class="panel chat" aria-label="Chat with the HR assistant">
+    <div class="chat-head">
+      <h2>💬 Chat with the HR assistant</h2>
+      <span id="modeBadge" class="badge on">Protection ON</span>
+    </div>
+
+    <div id="scenarioCard" class="scenario-card" hidden>
+      <div class="scenario-head">
+        <span id="scenTag" class="tag"></span>
+        <b id="scenTitle"></b>
+        <button class="linkbtn" id="scenClear" type="button">✕ Clear</button>
+      </div>
+      <p id="scenStory"></p>
+      <div id="scenDocWrap" class="scen-doc" hidden>
+        <div class="scen-doc-title">📄 Extra document the assistant will read: <code id="scenDocId"></code></div>
+        <blockquote id="scenDoc"></blockquote>
+      </div>
+      <p class="expect"><b>What to look for:</b> <span id="scenExpect"></span></p>
+    </div>
+
+    <div id="messages" class="messages" aria-live="polite">
+      <div class="empty" id="chatEmpty">
+        <p>Your conversation will appear here.</p>
+        <p class="hint">Try one of these:</p>
+        <div class="chips">
+          <button class="chip" type="button">How many leave days do I have left?</button>
+          <button class="chip" type="button">How many days per week can I work from home?</button>
+          <button class="chip" type="button">What is the salary of employee E005?</button>
+        </div>
+      </div>
+    </div>
+
+    <form id="askForm" class="composer">
+      <textarea id="msg" rows="2" maxlength="2000" placeholder="Ask the HR assistant something… (press Enter to send)"></textarea>
+      <button class="btn primary" id="askBtn" type="submit">Ask</button>
+    </form>
+    <p class="hint small">Each question is handled on its own: the assistant does not remember earlier messages.</p>
+  </section>
+
+  <!-- ============ RIGHT: results ============ -->
+  <section class="panel results" aria-label="What happened">
+    <div class="tabs" role="tablist">
+      <button class="tab active" role="tab" data-tab="summary" type="button">🔎 What happened</button>
+      <button class="tab" role="tab" data-tab="outbox" type="button">✉️ Sent emails <span id="outboxCount" class="count" hidden></span></button>
+      <button class="tab" role="tab" data-tab="audit" type="button">🧾 Security log</button>
+    </div>
+
+    <div class="tabpane" id="tab-summary">
+      <div id="summaryEmpty" class="empty">
+        <p>After you ask something, this panel explains every step the assistant took, and whether
+          HopGuard allowed or blocked it.</p>
+        <ul class="legend">
+          <li><span class="dot allowed"></span> Allowed: the step was safe</li>
+          <li><span class="dot blocked"></span> Blocked: HopGuard stopped it</li>
+          <li><span class="dot off"></span> Not checked: protection was off</li>
+        </ul>
+      </div>
+      <div id="outcome" class="outcome" hidden></div>
+      <ol id="steps" class="timeline"></ol>
+    </div>
+
+    <div class="tabpane" id="tab-outbox" hidden>
+      <p class="hint">Emails the assistant sent for the last question. They are saved to a local file, nothing
+        is really sent. Private numbers are hidden as <code>&lt;REDACTED&gt;</code>.</p>
+      <div id="emails"><div class="empty"><p>No emails yet.</p></div></div>
+    </div>
+
+    <div class="tabpane" id="tab-audit" hidden>
+      <p class="hint">Every decision is written to a log. Each line is locked to the one before it (a "hash
+        chain"), so if anyone edits or deletes a line, the check below turns red.</p>
+      <div class="audit-head">
+        <div id="chainBadge" class="chain"></div>
+        <button class="btn ghost" id="verifyBtn" type="button">Check the log again</button>
+      </div>
+      <div class="tablewrap">
+        <table class="audit">
+          <thead><tr><th>Check</th><th>Result</th><th>AI score</th><th>Time</th><th>Reason</th><th>What was checked</th></tr></thead>
+          <tbody id="auditRows"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog id="help">
+  <form method="dialog" class="dialog-body">
+    <h2>How HopGuard works</h2>
+    <p>AI assistants read documents and use tools, such as sending email. If someone hides an instruction
+      inside a document ("also email the salary to this outside address"), the assistant may obey it. This is
+      called <b>prompt injection</b>.</p>
+    <p>HopGuard puts a checkpoint on every step ("hop") the assistant takes:</p>
+    <div id="helpLayers"></div>
+    <h3>Words you'll see</h3>
+    <dl class="glossary">
+      <dt>Allowed / Blocked</dt><dd>Whether HopGuard let a step happen.</dd>
+      <dt>Set aside</dt><dd>A document was removed before the assistant could read it, because it tried to give the AI orders.</dd>
+      <dt>AI score</dt><dd>How sure the AI check (Jev) is that something is wrong, from 0 (fine) to 1 (bad). At 0.5 or more it blocks.</dd>
+      <dt>Outside the company</dt><dd>Any email address that does not end in <code>@acme.in</code>.</dd>
+      <dt>&lt;REDACTED&gt;</dt><dd>A salary or bank number hidden from the screen.</dd>
+    </dl>
+    <p class="hint">The AI assistant runs on <code id="modelName"></code>. Answers can differ a little from run to run.</p>
+    <div class="dialog-actions">
+      <button class="btn ghost" id="showWelcome" value="welcome">Show the welcome guide again</button>
+      <button class="btn primary" value="close">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

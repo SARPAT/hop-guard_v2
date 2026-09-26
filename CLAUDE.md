@@ -16,7 +16,7 @@ indirect prompt injection and data exfiltration.
 |----|------|-------|
 | 1 | Target + attacks | synthetic HR data, 3 tools, agent loop, 4 attacks, baseline runner (NO guard) |
 | 2 | Guard | G1 Jev (docs), G3 Jev (tool calls), G4 code (egress + role scope), audit log |
-| 3 | Demo UI | Gradio: defence ON/OFF, live trace, outbox, audit viewer |
+| 3 | Demo UI | Web UI (stdlib server + plain HTML/JS): defence ON/OFF, step view, outbox, audit viewer |
 | 4 | Mini harness | 4 attacks + 5 benign, N runs, modes OFF / FULL / G1-off → results table |
 | 5 | Package | README (threat model, results, out-of-scope), slides |
 

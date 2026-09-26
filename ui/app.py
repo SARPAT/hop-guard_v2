@@ -1,152 +1,149 @@
-"""HopGuard demo UI (Gradio). Run: python ui/app.py"""
+"""HopGuard demo UI: a small web app served by Python's standard library (no extra dependencies).
+
+Run: python ui/app.py   then open http://127.0.0.1:7860
+"""
+import argparse
+import json
+import mimetypes
 import os
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
-import gradio as gr  # noqa: E402
-
-from harness.cases import all_cases  # noqa: E402
 from hopguard.agent.data import EMPLOYEES, POLICY_DOCS  # noqa: E402
 from hopguard.agent.tools import Session, read_outbox, reset_outbox  # noqa: E402
-from hopguard.config import GROQ_MODEL  # noqa: E402
-from hopguard.guard import AuditLog, verify_chain  # noqa: E402
+from hopguard.guard import AuditLog  # noqa: E402
 from hopguard.guard.audit import read_rows, redact  # noqa: E402
 from hopguard.pipeline import guarded_run  # noqa: E402
+from ui import logic  # noqa: E402
 
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+LOG_DIR = os.path.join(ROOT, "logs")
 AUDIT_PATH = os.path.join(LOG_DIR, "audit_ui.jsonl")
-os.makedirs(LOG_DIR, exist_ok=True)
-AUDIT = AuditLog(AUDIT_PATH)
+MAX_MESSAGE = 2000
+MAX_BODY = 16_000
 
-CLEAN = "(none) clean corpus, type your own question"
-PRESETS = {CLEAN: None} | {f"{c['id']} · {c.get('description', c['query'])[:60]}": c for c, _ in all_cases()}
-USERS = [f"{e['id']} · {e['name']}" for e in EMPLOYEES.values()]
-TRACE_HEADERS = ["step", "hop", "verdict", "layer", "p", "ms"]
-AUDIT_HEADERS = ["trace_id", "layer", "verdict", "p", "ms", "reason", "snippet"]
+_audit: AuditLog | None = None
+_lock = threading.Lock()  # one request at a time: the outbox file and audit chain are shared
 
 
-def _uid(label: str) -> str:
-    return label.split(" · ")[0]
+def audit() -> AuditLog:
+    global _audit
+    if _audit is None:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        _audit = AuditLog(AUDIT_PATH)
+    return _audit
 
 
-def load_preset(name: str):
-    """Preset → query, user, role, and the extra (possibly poisoned) doc added to the corpus."""
-    case = PRESETS[name]
-    if case is None:
-        return gr.update(value=""), gr.update(), gr.update(), None, corpus_note(None)
-    user = next(u for u in USERS if _uid(u) == case["user_id"])
-    extra = case.get("poison_doc") or case.get("extra_doc")
-    return case["query"], user, case["role"], extra, corpus_note(extra)
+class BadRequest(ValueError):
+    pass
 
 
-def corpus_note(extra: dict | None) -> str:
-    base = f"**Corpus:** {len(POLICY_DOCS)} HR policy docs"
-    return base + (f" + untrusted doc `{extra['id']}`" if extra else " (no untrusted docs)")
+def handle_ask(body: dict) -> dict:
+    """Validate one chat request, run it through the guarded pipeline and build the view."""
+    message = str(body.get("message", "")).strip()
+    user_id = str(body.get("user_id", "")).upper()
+    role = body.get("role")
+    if not message:
+        raise BadRequest("Please type a question first.")
+    if len(message) > MAX_MESSAGE:
+        raise BadRequest(f"Please keep the question under {MAX_MESSAGE} characters.")
+    if user_id not in EMPLOYEES:
+        raise BadRequest("Please pick who is asking.")
+    if role not in logic.ROLES:
+        raise BadRequest("Please pick a role.")
+    layers = body.get("layers") or {}
+    toggles = {k: bool(layers.get(k)) for k in ("G1", "G3", "G4")}
+    guard_on = any(toggles.values())
 
-
-def flip_all(on: bool):
-    return on, on, on
-
-
-def trace_rows(g, toggles) -> list[list]:
-    rows = []
-    for r in read_rows(AUDIT_PATH):
-        if r["trace_id"] == g.trace_id and r["layer"] == "G1":
-            rows.append([0, f"ingest: {r['reason'].removeprefix('doc ')}", r["verdict"], "G1", r["p"], r["ms"]])
-    for t in g.result.trace:
-        shown = {k: v for k, v in t["args"].items() if k != "body"}
-        hop = f"{t['tool']}({redact(', '.join(f'{k}={v}' for k, v in shown.items()))[:70]})"
-        if not t["layers"]:
-            rows.append([t["step"], hop, t["verdict"], "-" if toggles is None else "?", None, None])
-        for v in t["layers"]:
-            rows.append([t["step"], hop, v["decision"], v["layer"], v["p"], v["ms"]])
-    return rows
-
-
-def outbox_md() -> str:
-    box = read_outbox()
-    if not box:
-        return "_Outbox empty: nothing was sent by this request._"
-    lines = []
-    for r in box:
-        ext = [a for a in [r["to"], *r.get("cc", [])] if not a.lower().endswith("@acme.in")]
-        flag = "🔴 **EXTERNAL**" if ext else "✅ internal"
-        cc = f"  cc: `{', '.join(r['cc'])}`" if r.get("cc") else ""
-        lines.append(f"{flag} → to: `{r['to']}`{cc}\n\n> " + redact(r["body"]).replace("\n", "\n> "))
-    return "\n\n---\n\n".join(lines)
-
-
-def audit_view():
-    ok, bad = verify_chain(AUDIT_PATH)
-    rows = read_rows(AUDIT_PATH)
-    badge = (f"### ✓ Audit chain intact ({len(rows)} rows)" if ok
-             else f"### ✗ Audit chain BROKEN at row {bad}")
-    table = [[r["trace_id"], r["layer"], r["verdict"], r["p"], r["ms"], r["reason"], r["snippet"][:80]]
-             for r in rows[-60:]][::-1]
-    return badge, table
-
-
-def ask(message, history, user, role, g1, g3, g4, extra):
-    history = list(history or [])
-    if not (message or "").strip():
-        return history, "", [], outbox_md(), *audit_view()
-    toggles = {"G1": g1, "G3": g3, "G4": g4}
-    toggles = toggles if any(toggles.values()) else None
     docs = dict(POLICY_DOCS)
-    if extra:
-        docs[extra["id"]] = extra["text"]
-    reset_outbox()
-    g = guarded_run(message, Session(_uid(user), role), docs, toggles, AUDIT)
-    mode = "OFF" if toggles is None else "+".join(k for k, v in toggles.items() if v)
-    answer = g.result.answer or f"(error: {g.result.error})"
-    note = f"\n\n_trace `{g.trace_id}` · defence {mode} · {g.result.ms} ms_"
-    if g.quarantined:
-        note += f"\n\n_G1 quarantined: {', '.join(g.quarantined)}_"
-    history += [{"role": "user", "content": message}, {"role": "assistant", "content": redact(answer) + note}]
-    return history, "", trace_rows(g, toggles), outbox_md(), *audit_view()
+    scenario = logic.scenario_by_id(body.get("scenario_id"))
+    if scenario and scenario["doc"]:
+        docs[scenario["doc"]["id"]] = scenario["doc"]["text"]
+
+    with _lock:
+        reset_outbox()
+        g = guarded_run(message, Session(user_id, role), docs, toggles if guard_on else None, audit())
+        outbox = read_outbox()
+        g1_rows = [r for r in read_rows(AUDIT_PATH) if r["trace_id"] == g.trace_id and r["layer"] == "G1"]
+
+    res = g.result
+    step_list = logic.steps(res.trace, g1_rows, user_id, guard_on)
+    return {"trace_id": g.trace_id, "ms": res.ms, "guard_on": guard_on,
+            "answer": redact(res.answer or ""), "error": res.error and redact(res.error),
+            "steps": step_list, "emails": logic.emails(outbox), "quarantined": g.quarantined,
+            "outcome": logic.outcome(res.answer, res.error, outbox, step_list, user_id, role, guard_on),
+            "audit": logic.audit_view(AUDIT_PATH)}
 
 
-def build() -> gr.Blocks:
-    with gr.Blocks(title="HopGuard demo") as demo:
-        gr.Markdown(f"# HopGuard: per-hop guardrails for an HR agent\n"
-                    f"Agent model `{GROQ_MODEL}` · all data synthetic · email goes to a local outbox only")
-        extra = gr.State(None)
-        with gr.Row():
-            with gr.Column(scale=5):
-                with gr.Row():
-                    user = gr.Dropdown(USERS, value=USERS[2], label="User (session)")
-                    role = gr.Dropdown(["employee", "hr_admin"], value="employee", label="Role (session)")
-                with gr.Row():
-                    defence = gr.Checkbox(True, label="Defence ON")
-                    g1 = gr.Checkbox(True, label="G1 ingest (Jev)")
-                    g3 = gr.Checkbox(True, label="G3 tool call (Jev)")
-                    g4 = gr.Checkbox(True, label="G4 egress + scope (code)")
-                preset = gr.Dropdown(list(PRESETS), value=CLEAN, label="Preset attack / benign case")
-                corpus = gr.Markdown(corpus_note(None))
-                chat = gr.Chatbot(label="Chat", height=420)
-                msg = gr.Textbox(label="Message", placeholder="Ask the HR assistant…", lines=2)
-                send = gr.Button("Send", variant="primary")
-            with gr.Column(scale=6):
-                gr.Markdown("### Live trace")
-                trace = gr.Dataframe(headers=TRACE_HEADERS, value=[], wrap=True, interactive=False)
-                gr.Markdown("### Outbox (redacted)")
-                outbox = gr.Markdown(outbox_md())
-                badge0, rows0 = audit_view()
-                badge = gr.Markdown(badge0)
-                audit = gr.Dataframe(headers=AUDIT_HEADERS, value=rows0, wrap=True, interactive=False,
-                                     label="Audit log (newest first)")
-                refresh = gr.Button("Verify chain / refresh")
+class Handler(BaseHTTPRequestHandler):
+    server_version = "HopGuard"
 
-        defence.change(flip_all, defence, [g1, g3, g4])
-        preset.change(load_preset, preset, [msg, user, role, extra, corpus])
-        inputs = [msg, chat, user, role, g1, g3, g4, extra]
-        outputs = [chat, msg, trace, outbox, badge, audit]
-        send.click(ask, inputs, outputs)
-        msg.submit(ask, inputs, outputs)
-        refresh.click(audit_view, None, [badge, audit])
-    return demo
+    def log_request(self, code="-", size="-"):  # keep the terminal quiet apart from errors
+        if not (isinstance(code, int) and code < 400):
+            super().log_request(code, size)
+
+    def _send(self, code: int, data: bytes, ctype: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _json(self, code: int, obj) -> None:
+        self._send(code, json.dumps(obj).encode(), "application/json")
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/setup":
+            return self._json(200, logic.setup())
+        if path == "/api/audit":
+            return self._json(200, logic.audit_view(AUDIT_PATH))
+        name = "index.html" if path in ("/", "") else path.lstrip("/")
+        full = os.path.realpath(os.path.join(STATIC, name))
+        if not full.startswith(os.path.realpath(STATIC) + os.sep) or not os.path.isfile(full):
+            return self._json(404, {"error": "Not found"})
+        with open(full, "rb") as f:
+            ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+            self._send(200, f.read(), ctype + ("; charset=utf-8" if ctype.startswith("text/") else ""))
+
+    def do_POST(self):
+        if self.path != "/api/ask":
+            return self._json(404, {"error": "Not found"})
+        try:
+            size = int(self.headers.get("Content-Length", 0))
+            if size > MAX_BODY:
+                raise BadRequest("Request too large.")
+            body = json.loads(self.rfile.read(size) or b"{}")
+            if not isinstance(body, dict):
+                raise BadRequest("Bad request.")
+            return self._json(200, handle_ask(body))
+        except (BadRequest, json.JSONDecodeError) as e:
+            return self._json(400, {"error": str(e) if isinstance(e, BadRequest) else "Bad request."})
+        except Exception as e:  # show a friendly message, keep details in the terminal
+            self.log_error("ask failed: %s", redact(f"{type(e).__name__}: {e}"))
+            return self._json(500, {"error": "The assistant could not finish this request. "
+                                             "Check the terminal where the app is running for details."})
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="HopGuard demo UI")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=7860)
+    a = ap.parse_args()
+    keys = logic.keys_status()
+    print("HopGuard demo UI  ·  keys: " + ", ".join(f"{k} {'SET' if v else 'MISSING'}" for k, v in keys.items()))
+    print(f"Open http://{a.host}:{a.port} in your browser. Press Ctrl+C to stop.")
+    try:
+        ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")
 
 
 if __name__ == "__main__":
-    build().launch(server_name="127.0.0.1")
+    main()
